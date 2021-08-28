@@ -19,12 +19,12 @@ package raft
 
 import (
 	"errors"
+	"lib-raft/labrpc"
 	"math/rand"
 	"sync"
+	"sync/atomic"
 	"time"
 )
-import "sync/atomic"
-import "lib-raft/labrpc"
 
 // import "bytes"
 // import "../labgob"
@@ -59,11 +59,11 @@ type LogEntry struct {
 // A Go object implementing a single Raft peer.
 //
 type Raft struct {
-	mu        sync.Mutex          // Lock to protect shared access to this peer's state
-	peers     []*labrpc.ClientEnd // RPC end points of all peers
-	persister *Persister          // Object to hold this peer's persisted state
-	me        int                 // this peer's index into peers[]
-	dead      int32               // set by Kill()
+	mu        sync.Mutex     // Lock to protect shared access to this peer's state
+	peers     []*labrpc.Node // RPC end points of all peers
+	persister *Persister     // Object to hold this peer's persisted state
+	me        *labrpc.Node   // this peer's index into peers[]
+	dead      int32          // set by Kill()
 
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
@@ -84,7 +84,7 @@ type Raft struct {
 
 // return currentTerm and whether this server
 // believes it is the leader.
-func (rf *Raft) GetState() (int, bool) {
+func (rf *Raft) getState() (int, bool) {
 
 	var term int
 	var isLeader bool
@@ -173,7 +173,7 @@ type AppendEntriesReply struct {
 //
 // example RequestVote RPC handler.
 //
-func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) error {
 	// Your code here (2A, 2B).
 	requesterTerm := args.Term
 	rf.mu.Lock()
@@ -201,7 +201,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.nextElectionTimeOut = time.Duration(randT) * time.Millisecond //* time.Duration(rf.me+1)
 		rf.electionResetTime = time.Now()
 	}
-	return
+	return nil
 }
 
 // If followers command for leader commitIndex does not match return false
@@ -209,7 +209,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // till leader finds a matching index and then send AE will all the prev logs
 // follower should delete its logs from this point onwards and accept leaders logs
 
-func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) error {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
@@ -277,7 +277,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	//DPrintf("%d log %v", rf.me, rf.log)
 	//DPrintf("%d reply %v", rf.me, reply)
 	//DPrintf("%d election timeout %v", rf.me, rf.nextElectionTimeOut)
-	return
+	return nil
 }
 
 //
@@ -335,7 +335,18 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // Term. the third return value is true if this server believes it is
 // the leader.
 //
-func (rf *Raft) Start(command interface{}) (int, int, bool) {
+
+type StartReply struct {
+	IsLeader bool
+	Index    int
+	Term     int
+}
+
+type StartArgs struct {
+	Data interface{}
+}
+
+func (rf *Raft) Start(command *StartArgs, rep *StartReply) error {
 	term := -1
 	isLeader := true
 	commitIndex := 0
@@ -365,7 +376,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		consensus := 1
 		wg := sync.WaitGroup{}
 		for p := range rf.peers {
-			if p != rf.me {
+			if p != rf.me.Id {
 				wg.Add(1)
 				go func(peer int, entries []LogEntry) {
 					rf.mu.Lock()
@@ -375,7 +386,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 					if isLeader {
 						args := AppendEntriesArgs{
 							Term:         rf.currentTerm,
-							LeaderId:     rf.me,
+							LeaderId:     rf.me.Id,
 							PrevLogIndex: prevLogIndex,
 							PrevLogTerm:  prevLogTerm,
 							LeaderCommit: rf.commitIndex,
@@ -446,7 +457,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	if isLeader {
 		DPrintf("\033[1;32m %d return index %d term %d is leader %t \033[0m", rf.me, commitIndex, term, isLeader)
 	}
-	return commitIndex, term, isLeader
+	rep.IsLeader = isLeader
+	rep.Index = commitIndex
+	rep.Term = term
+
+	return nil
 }
 
 func (rf *Raft) synWithFollower(follower int, followerPrevIndex int) (bool, int) {
@@ -461,7 +476,7 @@ func (rf *Raft) synWithFollower(follower int, followerPrevIndex int) (bool, int)
 			leaderTerm := rf.log[i].Term
 			args := AppendEntriesArgs{
 				Term:         rf.currentTerm,
-				LeaderId:     rf.me,
+				LeaderId:     rf.me.Id,
 				PrevLogIndex: i,
 				PrevLogTerm:  leaderTerm,
 			}
@@ -509,7 +524,7 @@ func (rf *Raft) findPrevLogEntry() (error, int, int) {
 // confusing debug output. any goroutine with a long-running loop
 // should call killed() to check whether it should stop.
 //
-func (rf *Raft) Kill() {
+func (rf *Raft) kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
 }
@@ -549,7 +564,7 @@ func (rf *Raft) killed() bool {
 	then it assumes there is no viable leader and begins an election to choose a new leader.
 */
 
-func (rf *Raft) StartElection() {
+func (rf *Raft) startElection() {
 	rf.mu.Lock()
 	rf.isLeader = false
 	rf.isFollower = false
@@ -565,7 +580,7 @@ func (rf *Raft) StartElection() {
 	wg := sync.WaitGroup{}
 
 	for p := range candidatePeers {
-		if p != candidate {
+		if p != candidate.Id {
 			wg.Add(1)
 			go func(peer int, self int, term int) {
 				rf.mu.Lock()
@@ -583,13 +598,13 @@ func (rf *Raft) StartElection() {
 					voteCount++
 				}
 				wg.Done()
-			}(p, candidate, candidateTerm)
+			}(p, candidate.Id, candidateTerm)
 		}
 	}
 
 	wg.Wait()
 	DPrintf("%d election vote count %d", rf.me, voteCount)
-	rf.processResults(voteCount, candidate)
+	rf.processResults(voteCount, candidate.Id)
 }
 
 func (rf *Raft) initializeLeaderEntries() {
@@ -636,7 +651,7 @@ func (rf *Raft) beginLeadership(candidate int) {
 			var entries []LogEntry
 			args := AppendEntriesArgs{
 				Term:         rf.currentTerm,
-				LeaderId:     rf.me,
+				LeaderId:     rf.me.Id,
 				PrevLogIndex: prevLogIndex,
 				PrevLogTerm:  prevLogTerm,
 				LeaderCommit: rf.commitIndex,
@@ -671,7 +686,7 @@ func (rf *Raft) checkTimeout() {
 		if elapsed >= timeoutDuration {
 			if isFollower {
 				DPrintf("%d my leader not alive after %v starting election", rf.me, elapsed)
-				go rf.StartElection()
+				go rf.startElection()
 			}
 			//return
 		}
@@ -714,7 +729,7 @@ func (rf *Raft) checkNewLogEntry(applyCh chan ApplyMsg) {
 	}
 }
 
-func Make(peers []*labrpc.ClientEnd, me int,
+func Make(peers []*labrpc.Node, me *labrpc.Node,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{}
 	rf.peers = peers
